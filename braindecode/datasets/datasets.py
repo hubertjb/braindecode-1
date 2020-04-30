@@ -15,6 +15,7 @@ import glob
 import numpy as np
 import pandas as pd
 import mne
+from joblib import Parallel, delayed
 
 from .base import BaseDataset, BaseConcatDataset
 
@@ -130,35 +131,44 @@ class TUHAbnormal(BaseConcatDataset):
         if True, preload the data of the Raw objects.
     """
     def __init__(self, path, subject_ids=None, target_name="pathological",
-                 preload=False):
-        all_file_paths = read_all_file_names(
+                 preload=False, n_jobs=1):
+        self.all_file_paths = read_all_file_names(
             path, extension='.edf', key=self._time_key)
         if subject_ids is None:
-            subject_ids = np.arange(len(all_file_paths))
+            subject_ids = np.arange(len(self.all_file_paths))
 
-        all_base_ds = []
-        for subject_id in subject_ids:
-            file_path = all_file_paths[subject_id]
-            raw = mne.io.read_raw_edf(file_path, preload=preload)
-            path_splits = file_path.split("/")
-            if "abnormal" in path_splits:
-                pathological = True
-            else:
-                assert "normal" in path_splits
-                pathological = False
-            if "train" in path_splits:
-                session = "train"
-            else:
-                assert "eval" in path_splits
-                session = "eval"
-            age, gender = _parse_age_and_gender_from_edf_header(file_path)
-            description = pd.Series(
-                {'age': age, 'pathological': pathological, 'gender': gender,
-                'session': session, 'subject': subject_id}, name=subject_id)
-            base_ds = BaseDataset(raw, description, target_name=target_name)
-            all_base_ds.append(base_ds)
+        self.target_name = target_name
+        self.preload = preload
+
+        if n_jobs == 1:
+            all_base_ds = [
+                self._load_subject(subject_id) for subject_id in subject_ids]
+        else:
+            all_base_ds = Parallel(n_jobs=n_jobs)(
+                    delayed(self._load_subject)(i) for i in subject_ids)
 
         super().__init__(all_base_ds)
+
+    def _load_subject(self, subject_id):
+        file_path = self.all_file_paths[subject_id]
+        raw = mne.io.read_raw_edf(file_path, preload=self.preload)
+        path_splits = file_path.split("/")
+        if "abnormal" in path_splits:
+            pathological = 1
+        else:
+            assert "normal" in path_splits
+            pathological = 0
+        if "train" in path_splits:
+            session = "train"
+        else:
+            assert "eval" in path_splits
+            session = "eval"
+        age, gender = _parse_age_and_gender_from_edf_header(file_path)
+        description = pd.Series(
+            {'age': age, 'pathological': pathological, 'gender': gender,
+            'session': session, 'subject': subject_id}, name=subject_id)
+
+        return BaseDataset(raw, description, target_name=self.target_name)
 
     @staticmethod
     def _time_key(file_path):
@@ -173,7 +183,7 @@ class TUHAbnormal(BaseConcatDataset):
 
 
 # TODO: this is very slow. how to improve?
-def read_all_file_names(directory, extension, key):
+def read_all_file_names(directory, extension, key=None):
     """Read all files with specified extension from given path and sorts them
     based on a given sorting key.
 
@@ -183,7 +193,7 @@ def read_all_file_names(directory, extension, key):
         file path on HDD
     extension: str
         file path extension, i.e. '.edf' or '.txt'
-    key: calable
+    key: callable
         sorting key for the file paths
 
     Returns
@@ -191,8 +201,8 @@ def read_all_file_names(directory, extension, key):
     file_paths: list(str)
         a list to all files found in (sub)directories of path
     """
-    assert extension.startswith(".")
-    file_paths = glob.glob(directory + '**/*' + extension, recursive=True)
+    file_paths = glob.glob(
+        os.path.join(directory, '**/*' + extension), recursive=True)
     file_paths = sorted(file_paths, key=key)
     assert len(file_paths) > 0, (
         f"something went wrong. Found no {extension} files in {directory}")

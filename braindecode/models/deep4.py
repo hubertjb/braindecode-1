@@ -192,6 +192,10 @@ class Deep4Net(nn.Sequential):
                 bias=True,
             ),
         )
+        # self.add_module('flatten', nn.modules.Flatten())
+        # self.add_module('dense1', nn.Linear(500, 500))
+        # self.add_module('dense2', nn.Linear(500, 500))
+        # self.add_module('dense3', nn.Linear(500, self.n_classes))
         self.add_module("softmax", nn.LogSoftmax(dim=1))
         self.add_module("squeeze", Expression(_squeeze_final_output))
 

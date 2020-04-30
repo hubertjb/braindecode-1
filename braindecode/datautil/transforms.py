@@ -13,9 +13,10 @@ ToDo: should transformer also transform y (e.g. cutting continuous labelled
 from collections import OrderedDict
 
 import numpy as np
+from joblib import Parallel, delayed
 
 
-def transform_concat_ds(concat_ds, transforms):
+def transform_concat_ds(concat_ds, transforms, n_jobs=1):
     """Apply a number of transformers to a concat dataset.
 
     Parameters
@@ -25,6 +26,8 @@ def transform_concat_ds(concat_ds, transforms):
     transforms: dict(str | callable: dict)
         dict with function names of mne.raw or a custom transform and function
         kwargs
+    n_jobs: int
+        Number of jobs to parallelize the windowing.
 
     Returns
     -------
@@ -33,15 +36,25 @@ def transform_concat_ds(concat_ds, transforms):
     if not isinstance(transforms, OrderedDict):
         raise TypeError(
             "Order of transforms matters! Please provide an OrderedDict.")
-    for ds in concat_ds.datasets:
-        if hasattr(ds, "raw"):
+
+
+    def _transform_ds(ds):
+        if hasattr(ds, 'raw'):
             _transform(ds.raw, transforms)
-        elif hasattr(ds, "windows"):
+        elif hasattr(ds, 'windows'):
             _transform(ds.windows, transforms)
         else:
             raise ValueError(
                 'Can only transform concatenation of BaseDataset or '
                 'WindowsDataset, with either a `raw` or `windows` attribute.')
+
+
+    if n_jobs == 1:
+        for ds in concat_ds.datasets:
+            _transform_ds(ds)
+    else:
+        Parallel(n_jobs=n_jobs)(
+            delayed(_transform_ds)(ds) for ds in concat_ds.datasets)
 
     # Recompute cumulative sizes as the transforms might have changed them
     # XXX: Ultimately, the best solution would be to have cumulative_size be

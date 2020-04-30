@@ -11,6 +11,7 @@
 import numpy as np
 import mne
 import pandas as pd
+from joblib import Parallel, delayed
 
 from ..datasets.base import WindowsDataset, BaseConcatDataset
 
@@ -18,7 +19,8 @@ from ..datasets.base import WindowsDataset, BaseConcatDataset
 def create_windows_from_events(
         concat_ds, trial_start_offset_samples, trial_stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples, drop_samples,
-        mapping=None, preload=False, drop_bad_windows=True):
+        mapping=None, picks=None, preload=False, drop_bad_windows=True,
+        transform=None, extract_annotations=False, n_jobs=1):
     """Windower that creates supercrops/windows based on events in mne.Raw.
 
     The function fits supercrops of supercrop_size_samples in
@@ -48,6 +50,8 @@ def create_windows_from_events(
         supercrops/windows do not equally divide the continuous signal
     mapping: dict(str: int)
         mapping from event description to target value
+    picks: list | None
+        channels to use.
     preload: bool
         if True, preload the data of the Epochs objects.
     drop_bad_windows: bool
@@ -55,6 +59,13 @@ def create_windows_from_events(
         step allows identifiying e.g., windows that fall outside of the
         continuous recording. It is suggested to run this step here as otherwise
         the BaseConcatDataset has to be updated as well.
+    transform: object | None
+        Transform to be applied on-the-fly when calling __getitem__.
+    extract_annotations: bool
+        If True, extract overlapping ratios of the annotations in the Raw object
+        and add them to the metadata DataFrame.
+    n_jobs: int
+        Number of jobs to parallelize the windowing.
 
     Returns
     -------
@@ -65,16 +76,20 @@ def create_windows_from_events(
         trial_start_offset_samples, trial_stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples)
 
-    list_of_windows_ds = []
-    for ds in concat_ds.datasets:
-        if mapping is None:
+
+    def _apply_windowing(ds):
+        mapping_ds = mapping  # To avoid hiding parent namespace's mapping
+        if mapping_ds is None:
             # mapping event descriptions to integers from 0 on
-            mapping = {v: k for k, v in enumerate(
+            mapping_ds = {v: k for k, v in enumerate(
                 np.unique(ds.raw.annotations.description))}
 
-        events, _ = mne.events_from_annotations(ds.raw, mapping)
+        events, _ = mne.events_from_annotations(ds.raw, mapping_ds)
         onsets = events[:, 0]
-        stops = onsets + (ds.raw.annotations.duration
+        # XXX: Find another way of taking duration into account?
+        annots_inds = np.isin(
+            ds.raw.annotations.description, list(mapping_ds.keys()))
+        stops = onsets + (ds.raw.annotations.duration[annots_inds]
                           * ds.raw.info['sfreq']).astype(int)
 
         if stops[-1] + trial_stop_offset_samples > len(ds):
@@ -104,18 +119,30 @@ def create_windows_from_events(
             'i_start_in_trial': starts,
             'i_stop_in_trial': stops,
             'target': description})
+        if extract_annotations:
+            annots_md = get_annotations_ratio(
+                events, ds.raw, supercrop_size_samples)
+            metadata = pd.concat([metadata, annots_md], axis=1)
 
         # supercrop size - 1, since tmax is inclusive
         mne_epochs = mne.Epochs(
-            ds.raw, events, mapping ,baseline=None, tmin=0,
-            tmax=(supercrop_size_samples - 1) / ds.raw.info["sfreq"],
-            metadata=metadata, preload=preload)
+            ds.raw, events, mapping_ds ,baseline=None, tmin=0,
+            tmax=(supercrop_size_samples - 1) / ds.raw.info['sfreq'],
+            metadata=metadata, picks=picks, preload=preload,
+            on_missing='warning')
 
         if drop_bad_windows:
-            mne_epochs = mne_epochs.drop_bad(reject=None, flat=None)
+            mne_epochs = mne_epochs.drop_bad(reject=None, flat={'eeg': 1e-6})
 
-        windows_ds = WindowsDataset(mne_epochs, ds.description)
-        list_of_windows_ds.append(windows_ds)
+        return WindowsDataset(mne_epochs, ds.description, transform=transform)
+
+
+    if n_jobs == 1:
+        list_of_windows_ds = [
+            _apply_windowing(ds) for ds in concat_ds.datasets]
+    else:
+        list_of_windows_ds = Parallel(n_jobs=n_jobs)(
+                delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
 
     return BaseConcatDataset(list_of_windows_ds)
 
@@ -123,7 +150,8 @@ def create_windows_from_events(
 def create_fixed_length_windows(
         concat_ds, start_offset_samples, stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples, drop_samples,
-        mapping=None, preload=False, drop_bad_windows=True):
+        mapping=None, picks=None, preload=False, drop_bad_windows=True,
+        transform=None, n_jobs=1):
     """Windower that creates sliding supercrops/windows.
 
     Parameters
@@ -143,6 +171,8 @@ def create_fixed_length_windows(
         supercrops/windows do not equally divide the continuous signal
     mapping: dict(str: int)
         mapping from event description to target value
+    picks: list | None
+        channels to use.
     preload: bool
         if True, preload the data of the Epochs objects.
     drop_bad_windows: bool
@@ -150,6 +180,10 @@ def create_fixed_length_windows(
         step allows identifiying e.g., windows that fall outside of the
         continuous recording. It is suggested to run this step here as otherwise
         the BaseConcatDataset has to be updated as well.
+    transform: object | None
+        Transform to be applied on-the-fly when calling __getitem__.
+    n_jobs: int
+        Number of jobs to parallelize the windowing.
 
     Returns
     -------
@@ -160,8 +194,9 @@ def create_fixed_length_windows(
         start_offset_samples, stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples)
 
-    list_of_windows_ds = []
-    for ds in concat_ds.datasets:
+
+    def _apply_windowing(ds):
+        mapping_ds = mapping  # To avoid hiding parent namespace's mapping
         # already includes last incomplete supercrop start
         stop = (ds.raw.n_times
                 if stop_offset_samples is None
@@ -176,8 +211,8 @@ def create_fixed_length_windows(
 
         # TODO: handle multi-target case / non-integer target case
         target = -1 if ds.target is None else ds.target
-        if mapping is not None:
-            target = mapping[target]
+        if mapping_ds is not None:
+            target = mapping_ds[target]
         if not isinstance(target, (np.integer, int)):
             raise ValueError(f"Mapping from '{target}' to int is required")
 
@@ -192,15 +227,23 @@ def create_fixed_length_windows(
 
         # supercrop size - 1, since tmax is inclusive
         mne_epochs = mne.Epochs(
-            ds.raw, fake_events, baseline=None,
-            tmin=0, tmax=(supercrop_size_samples - 1) / ds.raw.info["sfreq"],
-            metadata=metadata, preload=preload)
+            ds.raw, fake_events, mapping_ds, baseline=None,
+            tmin=0, tmax=(supercrop_size_samples - 1) / ds.raw.info['sfreq'],
+            metadata=metadata, picks=picks, preload=preload,
+            on_missing='warning')
 
         if drop_bad_windows:
-            mne_epochs = mne_epochs.drop_bad(reject=None, flat=None)
+            mne_epochs = mne_epochs.drop_bad(reject=None, flat={'eeg': 1e-6})
 
-        windows_ds = WindowsDataset(mne_epochs, ds.description)
-        list_of_windows_ds.append(windows_ds)
+        return WindowsDataset(mne_epochs, ds.description, transform=transform)
+
+
+    if n_jobs == 1:
+        list_of_windows_ds = [
+            _apply_windowing(ds) for ds in concat_ds.datasets]
+    else:
+        list_of_windows_ds = Parallel(n_jobs=n_jobs)(
+                delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
 
     return BaseConcatDataset(list_of_windows_ds)
 
@@ -284,3 +327,40 @@ def _check_windowing_arguments(
         assert isinstance(trial_stop_offset_samples, (int, np.integer))
     assert isinstance(supercrop_size_samples, (int, np.integer))
     assert isinstance(supercrop_stride_samples, (int, np.integer))
+
+
+def get_annotations_ratio(events, raw, win_len):
+    """Get the ratio of each annotation inside events.
+
+    Parameters
+    ----------
+    events : np.ndarray
+        Events, shape (n_events, 3)
+    annots : mne.Annotations
+        Annotations.
+    times : np.ndarray
+        Sample times.
+    win_len : int
+        Number of samples in a window.
+
+    Return
+    ------
+    pd.DataFrame
+        DataFrame of shape (n_events, n_unique_annotations) containing the ratio
+        of each annotation for each event.
+    """
+    unique_annots = {d: i for i, d in enumerate(np.unique(raw.annotations.description))}
+    annots_events = np.zeros((events.shape[0], len(unique_annots)), dtype=np.float16)
+
+    for a_type in unique_annots:
+        grouped_a = raw.annotations[raw.annotations.description == a_type]
+        trigger = np.zeros(len(raw.times), dtype=int)
+        for a in grouped_a:
+            onset = a['onset'] - raw.first_samp / raw.info['sfreq']
+            mask = ((raw.times >= a['onset']) &
+                    (raw.times < a['onset'] + a['duration']))  # This is probably a big bottleneck...
+            trigger[mask] = 1
+        for i, start in enumerate(events[:, 0]):
+            annots_events[i, unique_annots[a_type]] = trigger[start:start + win_len].mean()
+
+    return pd.DataFrame(annots_events, columns=unique_annots.keys())

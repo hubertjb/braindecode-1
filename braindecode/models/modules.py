@@ -8,6 +8,8 @@ from ..util import np_to_var
 
 class Ensure4d(torch.nn.Module):
     def forward(self, x):
+        if isinstance(x, list):  # XXX: For benchmarking
+            x = x[0]
         while(len(x.shape) < 4):
             x = x.unsqueeze(-1)
         return x

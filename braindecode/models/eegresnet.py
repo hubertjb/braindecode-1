@@ -11,7 +11,7 @@ from torch.nn import init
 from torch.nn.functional import elu
 
 from ..util import np_to_var
-from .modules import Expression, AvgPool2dWithConv
+from .modules import Expression, AvgPool2dWithConv, Ensure4d
 
 
 class EEGResNet(nn.Sequential):
@@ -37,6 +37,7 @@ class EEGResNet(nn.Sequential):
         self.__dict__.update(locals())
         del self.self
 
+        self.add_module("ensuredims", Ensure4d())
         if self.split_first_layer:
             self.add_module('dimshuffle', Expression(_transpose_time_to_spat))
             self.add_module('conv_time', nn.Conv2d(1, self.n_first_filters,
