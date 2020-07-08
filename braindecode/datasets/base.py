@@ -75,14 +75,14 @@ class WindowsDataset(BaseDataset):
 
         self.transform = transform
 
-
     def __getitem__(self, index):
         # if self.windows.preload:  # For speed
         #   X = self.windows._data[index].astype('float32')
         # else:
-        X = self.windows.get_data(item=index)[0].astype('float32')
+        X = self.windows.get_data(item=index)[0]
         if self.transform is not None:
             X = self.transform(X)
+        X = X.astype('float32')
         y = self.y[index]
 
         if self.output_crop_inds:
@@ -95,6 +95,14 @@ class WindowsDataset(BaseDataset):
 
     def __len__(self):
         return len(self.windows.events)
+
+    @property
+    def transform(self):
+        return self._transform
+
+    @transform.setter
+    def transform(self, value):
+        self._transform = value
 
 
 class BaseConcatDataset(ConcatDataset):

@@ -92,7 +92,7 @@ def create_windows_from_events(
         stops = onsets + (ds.raw.annotations.duration[annots_inds]
                           * ds.raw.info['sfreq']).astype(int)
 
-        if stops[-1] + trial_stop_offset_samples > len(ds):
+        if stops[-1] + trial_stop_offset_samples > len(ds) + ds.raw.first_samp:
             raise ValueError('"trial_stop_offset_samples" too large. Stop of '
                              f'last trial ({stops[-1]}) + '
                              f'"trial_stop_offset_samples" '
@@ -203,11 +203,11 @@ def create_fixed_length_windows(
                 else stop_offset_samples)
         last_allowed_ind = stop - supercrop_size_samples
         starts = np.arange(start_offset_samples, last_allowed_ind + 1,
-                           supercrop_stride_samples)
+                           supercrop_stride_samples) + ds.raw.first_samp
 
-        if not drop_samples and starts[-1] < last_allowed_ind:
+        if not drop_samples and starts[-1] < last_allowed_ind + ds.raw.first_samp:
             # if last supercrop does not end at trial stop, make it stop there
-            starts = np.append(starts, last_allowed_ind)
+            starts = np.append(starts, last_allowed_ind + ds.raw.first_samp)
 
         # TODO: handle multi-target case / non-integer target case
         target = -1 if ds.target is None else ds.target
@@ -235,7 +235,12 @@ def create_fixed_length_windows(
         if drop_bad_windows:
             mne_epochs = mne_epochs.drop_bad(reject=None, flat={'eeg': 1e-6})
 
-        return WindowsDataset(mne_epochs, ds.description, transform=transform)
+        if len(mne_epochs) == 0:  # Ignore empty sessions  XXX TEST MORE EXTENSIVELY!
+            out = None
+        else:
+            out = WindowsDataset(mne_epochs, ds.description, transform=transform)
+
+        return out
 
 
     if n_jobs == 1:
@@ -244,6 +249,8 @@ def create_fixed_length_windows(
     else:
         list_of_windows_ds = Parallel(n_jobs=n_jobs)(
                 delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
+
+    list_of_windows_ds = [ds for ds in list_of_windows_ds if ds is not None]
 
     return BaseConcatDataset(list_of_windows_ds)
 
