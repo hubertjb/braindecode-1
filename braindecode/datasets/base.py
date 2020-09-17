@@ -49,6 +49,53 @@ class BaseDataset(Dataset):
         return len(self.raw)
 
 
+class WindowedRawDataset(BaseDataset):
+    """Provides the same API as WindowsDataset, but directly reads from Raw.
+
+
+    """
+    def __init__(self, raw, events, win_dur_samples, description,
+                 target_name=None):
+        super().__init__()
+
+        self.win_dur_samples = win_dur_samples
+        self.events = events
+
+    def __getitem__(self, index):
+        event_row = self.events[index]
+        start, y = event_row[0], event_row[2]
+
+        if self.index_transform is not None:
+            start = self.index_transform(
+                start, min_ind=0, max_ind=self.raw.n_times)
+
+        X = raw[:, start:start + self.win_dur_samples].astype('float32')
+
+        if self.transform is not None:
+            X = self.transform(X)
+
+        return X, y
+
+    def __len__(self):
+        return len(self.events)
+
+    @property
+    def transform(self):
+        return self._transform
+
+    @transform.setter
+    def transform(self, value):
+        self._transform = value
+
+    @property
+    def index_transform(self):
+        return self._index_transform
+
+    @index_transform.setter
+    def index_transform(self, value):
+        self._index_transform = value
+
+
 class WindowsDataset(BaseDataset):
     """Applies a windower to a base dataset.
 
