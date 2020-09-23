@@ -10,11 +10,12 @@ Dataset classes.
 #
 # License: BSD (3-clause)
 
+from collections.abc import Iterable
+
 import numpy as np
 import pandas as pd
 
-import time, torch  # XXX: For benchmarking workers, to be removed
-from torch.utils.data import Dataset, ConcatDataset, Subset
+from torch.utils.data import Dataset, ConcatDataset
 
 
 class BaseDataset(Dataset):
@@ -129,7 +130,10 @@ class WindowsDataset(BaseDataset):
         X = self.windows.get_data(item=index)[0]
         if self.transform is not None:
             X = self.transform(X)
-        X = X.astype('float32')
+        if isinstance(X, (tuple, list)):  # Temporary solution for DSF tests
+            X = [x.astype('float32') for x in X]
+        else:
+            X = X.astype('float32')
         y = self.y[index]
 
         if self.output_crop_inds:
