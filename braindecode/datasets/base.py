@@ -10,7 +10,9 @@ Dataset classes.
 #
 # License: BSD (3-clause)
 
-from collections.abc import Iterable
+import copy
+import warnings
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -108,26 +110,29 @@ class WindowsDataset(BaseDataset):
     description: pandas.Series
         holds additional info about the windows
     """
-    def __init__(self, windows, description, transform=None):
+    def __init__(self, windows, description, transform=None,
+                 target_name='target'):
         self.windows = windows
         self.description = description
-        self.y = np.array(self.windows.metadata.loc[:,'target'])
+        self.target_name = target_name
+        # self.y = np.array(self.windows.metadata.loc[:, 'target'])
 
         # XXX: Temporary hack - find another way to avoid skorch's
         #      incompatibility with more than 2 outputs
         self.output_crop_inds = False
         if self.output_crop_inds:
-            self.crop_inds = np.array(self.windows.metadata.loc[:,
-                                ['i_supercrop_in_trial', 'i_start_in_trial',
-                                'i_stop_in_trial']])
+            self.crop_inds = np.array(
+                self.windows.metadata.loc[
+                    :, ['i_supercrop_in_trial', 'i_start_in_trial', 'i_stop_in_trial']])
 
         self.transform = transform
+        self.picks = None
 
     def __getitem__(self, index):
         # if self.windows.preload:  # For speed
         #   X = self.windows._data[index].astype('float32')
         # else:
-        X = self.windows.get_data(item=index)[0]
+        X = self.windows.get_data(picks=self.picks, item=index)[0]
         if self.transform is not None:
             X = self.transform(X)
         if isinstance(X, (tuple, list)):  # Temporary solution for DSF tests
@@ -154,6 +159,41 @@ class WindowsDataset(BaseDataset):
     @transform.setter
     def transform(self, value):
         self._transform = value
+
+    @property
+    def picks(self):
+        return self._picks
+
+    @picks.setter
+    def picks(self, value):
+        self._picks = value
+
+    @property
+    def n_channels(self):
+        if self.picks is None or self.picks == 'all':
+            n_channels = len(self.windows.info['chs'])
+        else:
+            n_channels = len(self.picks)
+        return n_channels
+
+    @property
+    def y(self):
+        return self._y
+
+    @property
+    def target_name(self):
+        return self._target_name
+
+    @target_name.setter
+    def target_name(self, value):
+        self._target_name = value
+        if value in self.windows.metadata.columns:
+            self._y = np.array(self.windows.metadata.loc[:, value])
+        elif value in self.description:
+            y = self.description[value]
+            self._y = np.full(self.windows.metadata.shape[0], fill_value=y)
+        else:
+            raise ValueError(f'{value} is not in metadata or description.')
 
 
 class BaseConcatDataset(ConcatDataset):
@@ -259,6 +299,15 @@ class BaseConcatDataset(ConcatDataset):
         """
         if split_ids is None and some_property is None:
             raise ValueError('Splitting requires defining ids or a property.')
+
+        # Check for overlapping values
+        if isinstance(split_ids, list):
+            for i, j in combinations(range(len(split_ids)), 2):
+                if np.intersect1d(split_ids[i], split_ids[j]).size != 0:
+                    warnings.warn(
+                        f'Overlapping values in subsets {i} and {j}. Examples '
+                        'might be shared in different sets.')
+
         if isinstance(some_property, str) and isinstance(split_ids, list):
             split_ids = {
                 split_i: np.where(self.description[some_property].isin(inds))[0]
@@ -271,6 +320,7 @@ class BaseConcatDataset(ConcatDataset):
                          for split_i, split in enumerate(split_ids)}
 
         return {split_name: BaseConcatDataset(
+            # [copy.deepcopy(self.datasets[ds_ind]) for ds_ind in ds_inds],  # Keeping for debugging purposes
             [self.datasets[ds_ind] for ds_ind in ds_inds],
             sampling_kind=self.sampling_kind)
             for split_name, ds_inds in split_ids.items()}
@@ -304,3 +354,7 @@ class BaseConcatDataset(ConcatDataset):
             mds.append(md)
         df = pd.concat(mds)
         return df
+
+    @property
+    def y(self):
+        return np.concatenate([ds.y for ds in self.datasets], axis=0)

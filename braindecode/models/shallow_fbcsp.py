@@ -115,31 +115,31 @@ class ShallowFBCSPNet(nn.Sequential):
             )
             n_out_time = out.cpu().data.numpy().shape[2]
             self.final_conv_length = n_out_time
-        # self.add_module(  # XXX TO UNCOMMENT
-        #     "conv_classifier",
-        #     nn.Conv2d(
-        #         n_filters_conv,
-        #         self.n_classes,
-        #         (self.final_conv_length, 1),
-        #         bias=True,
-        #     ),
-        # )
-        # XXX THE FOLLOWING ARE TESTS (14/04/2020) #
-        emb_size = 100
         self.add_module(
             "conv_classifier",
             nn.Conv2d(
                 n_filters_conv,
-                emb_size,
+                self.n_classes,
                 (self.final_conv_length, 1),
                 bias=True,
             ),
         )
-        self.add_module('squeeze', Expression(_squeeze_final_output))
-        self.add_module('relu', Expression(relu))
-        self.add_module('drop2', nn.Dropout(p=self.drop_prob))
-        self.add_module('fc', nn.Linear(emb_size, self.n_classes))
-        ############################################
+        # # XXX THE FOLLOWING ARE TESTS (14/04/2020) #
+        # emb_size = 100
+        # self.add_module(
+        #     "conv_classifier",
+        #     nn.Conv2d(
+        #         n_filters_conv,
+        #         emb_size,
+        #         (self.final_conv_length, 1),
+        #         bias=True,
+        #     ),
+        # )
+        # self.add_module('squeeze', Expression(_squeeze_final_output))
+        # self.add_module('relu', Expression(relu))
+        # self.add_module('drop2', nn.Dropout(p=self.drop_prob))
+        # self.add_module('fc', nn.Linear(emb_size, self.n_classes))
+        # ############################################
         self.add_module("softmax", nn.LogSoftmax(dim=1))
         self.add_module("squeeze", Expression(_squeeze_final_output))
 

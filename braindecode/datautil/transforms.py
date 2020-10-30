@@ -16,7 +16,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 
-def transform_concat_ds(concat_ds, transforms, n_jobs=1):
+def transform_concat_ds(concat_ds, transforms, n_jobs=1, max_nbytes='1M'):
     """Apply a number of transformers to a concat dataset.
 
     Parameters
@@ -37,24 +37,28 @@ def transform_concat_ds(concat_ds, transforms, n_jobs=1):
         raise TypeError(
             "Order of transforms matters! Please provide an OrderedDict.")
 
-
     def _transform_ds(ds):
         if hasattr(ds, 'raw'):
-            _transform(ds.raw, transforms)
+            raw_or_epochs = _transform(ds.raw, transforms)
         elif hasattr(ds, 'windows'):
-            _transform(ds.windows, transforms)
+            raw_or_epochs = _transform(ds.windows, transforms)
         else:
             raise ValueError(
                 'Can only transform concatenation of BaseDataset or '
                 'WindowsDataset, with either a `raw` or `windows` attribute.')
-
+        return raw_or_epochs
 
     if n_jobs == 1:
         for ds in concat_ds.datasets:
             _transform_ds(ds)
     else:
-        Parallel(n_jobs=n_jobs)(
+        raws_or_epochs = Parallel(n_jobs=n_jobs, max_nbytes=max_nbytes)(
             delayed(_transform_ds)(ds) for ds in concat_ds.datasets)
+        for ds, raw_or_epoch in zip(concat_ds.datasets, raws_or_epochs):
+            if hasattr(ds, 'raw'):
+                ds.raw = raw_or_epoch
+            elif hasattr(ds, 'windows'):
+                ds.windows = raw_or_epoch
 
     # Recompute cumulative sizes as the transforms might have changed them
     # XXX: Ultimately, the best solution would be to have cumulative_size be
@@ -88,6 +92,8 @@ def _transform(raw_or_epochs, transforms):
                 raise AttributeError(
                     f'MNE object does not have {transform} method.')
             getattr(raw_or_epochs.load_data(), transform)(**transform_kwargs)
+
+    return raw_or_epochs
 
 
 def zscore(data):

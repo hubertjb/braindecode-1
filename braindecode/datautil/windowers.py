@@ -13,14 +13,14 @@ import mne
 import pandas as pd
 from joblib import Parallel, delayed
 
-from ..datasets.base import WindowsDataset, BaseConcatDataset
+from ..datasets.base import WindowsDataset, BaseConcatDataset, BaseDataset
 
 
 def create_windows_from_events(
         concat_ds, trial_start_offset_samples, trial_stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples, drop_samples,
         mapping=None, picks=None, preload=False, drop_bad_windows=True,
-        transform=None, extract_annotations=False, n_jobs=1):
+        transform=None, extract_annotations=False, n_jobs=1, max_nbytes='1M'):
     """Windower that creates supercrops/windows based on events in mne.Raw.
 
     The function fits supercrops of supercrop_size_samples in
@@ -76,7 +76,6 @@ def create_windows_from_events(
         trial_start_offset_samples, trial_stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples)
 
-
     def _apply_windowing(ds):
         mapping_ds = mapping  # To avoid hiding parent namespace's mapping
         if mapping_ds is None:
@@ -106,7 +105,7 @@ def create_windows_from_events(
             supercrop_stride_samples, drop_samples)
 
         events = [[start, supercrop_size_samples, description[i_trials[i_start]]]
-                   for i_start, start in enumerate(starts)]
+                  for i_start, start in enumerate(starts)]
         events = np.array(events)
 
         if any(np.diff(events[:, 0]) <= 0):
@@ -126,7 +125,7 @@ def create_windows_from_events(
 
         # supercrop size - 1, since tmax is inclusive
         mne_epochs = mne.Epochs(
-            ds.raw, events, mapping_ds ,baseline=None, tmin=0,
+            ds.raw, events, mapping_ds, baseline=None, tmin=0,
             tmax=(supercrop_size_samples - 1) / ds.raw.info['sfreq'],
             metadata=metadata, picks=picks, preload=preload,
             on_missing='warning')
@@ -136,22 +135,85 @@ def create_windows_from_events(
 
         return WindowsDataset(mne_epochs, ds.description, transform=transform)
 
-
     if n_jobs == 1:
         list_of_windows_ds = [
             _apply_windowing(ds) for ds in concat_ds.datasets]
     else:
-        list_of_windows_ds = Parallel(n_jobs=n_jobs)(
-                delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
+        list_of_windows_ds = Parallel(n_jobs=n_jobs, max_nbytes=max_nbytes)(
+            delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
 
     return BaseConcatDataset(list_of_windows_ds)
+
+
+def get_fixed_length_window(ds, mapping, start_offset_samples,
+                            stop_offset_samples, supercrop_size_samples,
+                            supercrop_stride_samples, drop_samples,
+                            drop_bad_windows, preload, picks, transform,
+                            description=None, target=None, mne_out=False):
+    if isinstance(ds, BaseDataset):
+        raw = ds.raw
+        description = ds.description
+        target = ds.target
+    elif isinstance(ds, mne.io.Raw):
+        raw = ds
+    else:
+        raise ValueError('ds must be of type BaseDataset or mne.io.Raw')
+
+    # already includes last incomplete supercrop start
+    stop = (raw.n_times
+            if stop_offset_samples is None
+            else stop_offset_samples)
+    last_allowed_ind = stop - supercrop_size_samples
+    starts = np.arange(start_offset_samples, last_allowed_ind + 1,
+                       supercrop_stride_samples) + raw.first_samp
+
+    if not drop_samples and starts[-1] < last_allowed_ind + raw.first_samp:
+        # if last supercrop does not end at trial stop, make it stop there
+        starts = np.append(starts, last_allowed_ind + raw.first_samp)
+
+    # TODO: handle multi-target case / non-integer target case
+    target = -1 if target is None else target
+    if mapping is not None:
+        target = mapping[target]
+    if type(target) in (float, np.float, np.float32):  # Most likely regression target
+        target = int(target)
+    if not isinstance(target, (np.integer, int)):
+        raise ValueError(f"Mapping from '{target}' to int is required")
+
+    fake_events = [[start, supercrop_size_samples, target]
+                   for i_start, start in enumerate(starts)]
+    metadata = pd.DataFrame({
+        'i_supercrop_in_trial': np.arange(len(fake_events)),
+        'i_start_in_trial': starts,
+        'i_stop_in_trial': starts + supercrop_size_samples,
+        'target': len(fake_events) * [target]
+    })
+
+    # supercrop size - 1, since tmax is inclusive
+    mne_epochs = mne.Epochs(
+        raw, fake_events, mapping, baseline=None, tmin=0,
+        tmax=(supercrop_size_samples - 1) / raw.info['sfreq'],
+        metadata=metadata, picks=picks, preload=preload,
+        on_missing='warning')
+
+    if drop_bad_windows:
+        mne_epochs = mne_epochs.drop_bad(reject=None, flat={'eeg': 1e-6})
+
+    if len(mne_epochs) == 0:  # Ignore empty sessions  XXX TEST MORE EXTENSIVELY!
+        out = None
+    elif mne_out:
+        out = mne_epochs
+    else:
+        out = WindowsDataset(mne_epochs, description, transform=transform)
+
+    return out
 
 
 def create_fixed_length_windows(
         concat_ds, start_offset_samples, stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples, drop_samples,
         mapping=None, picks=None, preload=False, drop_bad_windows=True,
-        transform=None, n_jobs=1):
+        transform=None, n_jobs=1, max_nbytes='1M'):
     """Windower that creates sliding supercrops/windows.
 
     Parameters
@@ -194,61 +256,20 @@ def create_fixed_length_windows(
         start_offset_samples, stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples)
 
-
-    def _apply_windowing(ds):
-        mapping_ds = mapping  # To avoid hiding parent namespace's mapping
-        # already includes last incomplete supercrop start
-        stop = (ds.raw.n_times
-                if stop_offset_samples is None
-                else stop_offset_samples)
-        last_allowed_ind = stop - supercrop_size_samples
-        starts = np.arange(start_offset_samples, last_allowed_ind + 1,
-                           supercrop_stride_samples) + ds.raw.first_samp
-
-        if not drop_samples and starts[-1] < last_allowed_ind + ds.raw.first_samp:
-            # if last supercrop does not end at trial stop, make it stop there
-            starts = np.append(starts, last_allowed_ind + ds.raw.first_samp)
-
-        # TODO: handle multi-target case / non-integer target case
-        target = -1 if ds.target is None else ds.target
-        if mapping_ds is not None:
-            target = mapping_ds[target]
-        if not isinstance(target, (np.integer, int)):
-            raise ValueError(f"Mapping from '{target}' to int is required")
-
-        fake_events = [[start, supercrop_size_samples, target]
-                        for i_start, start in enumerate(starts)]
-        metadata = pd.DataFrame({
-            'i_supercrop_in_trial': np.arange(len(fake_events)),
-            'i_start_in_trial': starts,
-            'i_stop_in_trial': starts + supercrop_size_samples,
-            'target': len(fake_events) * [target]
-        })
-
-        # supercrop size - 1, since tmax is inclusive
-        mne_epochs = mne.Epochs(
-            ds.raw, fake_events, mapping_ds, baseline=None,
-            tmin=0, tmax=(supercrop_size_samples - 1) / ds.raw.info['sfreq'],
-            metadata=metadata, picks=picks, preload=preload,
-            on_missing='warning')
-
-        if drop_bad_windows:
-            mne_epochs = mne_epochs.drop_bad(reject=None, flat={'eeg': 1e-6})
-
-        if len(mne_epochs) == 0:  # Ignore empty sessions  XXX TEST MORE EXTENSIVELY!
-            out = None
-        else:
-            out = WindowsDataset(mne_epochs, ds.description, transform=transform)
-
-        return out
-
-
     if n_jobs == 1:
         list_of_windows_ds = [
-            _apply_windowing(ds) for ds in concat_ds.datasets]
+            get_fixed_length_window(
+                ds, mapping, start_offset_samples, stop_offset_samples,
+                supercrop_size_samples, supercrop_stride_samples, drop_samples,
+                drop_bad_windows, preload, picks, transform)
+            for ds in concat_ds.datasets]
     else:
-        list_of_windows_ds = Parallel(n_jobs=n_jobs)(
-                delayed(_apply_windowing)(ds) for ds in concat_ds.datasets)
+        list_of_windows_ds = Parallel(n_jobs=n_jobs, max_nbytes=max_nbytes)(
+            delayed(get_fixed_length_window)(
+                ds, mapping, start_offset_samples, stop_offset_samples,
+                supercrop_size_samples, supercrop_stride_samples, drop_samples,
+                drop_bad_windows, preload, picks, transform)
+            for ds in concat_ds.datasets)
 
     list_of_windows_ds = [ds for ds in list_of_windows_ds if ds is not None]
 
