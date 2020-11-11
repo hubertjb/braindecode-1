@@ -178,6 +178,8 @@ class WindowsDataset(BaseDataset):
 
     @property
     def y(self):
+        # Update y (in case Epochs have changed in-place)
+        self.target_name = self._target_name
         return self._y
 
     @property
