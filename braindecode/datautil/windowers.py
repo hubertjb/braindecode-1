@@ -88,8 +88,8 @@ def create_windows_from_events(
         # XXX: Find another way of taking duration into account?
         annots_inds = np.isin(
             ds.raw.annotations.description, list(mapping_ds.keys()))
-        stops = onsets + (ds.raw.annotations.duration[annots_inds]
-                          * ds.raw.info['sfreq']).astype(int)
+        stops = onsets + (ds.raw.annotations.duration[annots_inds] *
+                          ds.raw.info['sfreq']).astype(int)
 
         if stops[-1] + trial_stop_offset_samples > len(ds) + ds.raw.first_samp:
             raise ValueError('"trial_stop_offset_samples" too large. Stop of '
@@ -149,7 +149,8 @@ def get_fixed_length_window(ds, mapping, start_offset_samples,
                             stop_offset_samples, supercrop_size_samples,
                             supercrop_stride_samples, drop_samples,
                             drop_bad_windows, preload, picks, transform,
-                            description=None, target=None, mne_out=False):
+                            description=None, target=None, mne_out=False,
+                            extract_annotations=False):
     if isinstance(ds, BaseDataset):
         raw = ds.raw
         description = ds.description
@@ -188,6 +189,10 @@ def get_fixed_length_window(ds, mapping, start_offset_samples,
         'i_stop_in_trial': starts + supercrop_size_samples,
         'target': len(fake_events) * [target]
     })
+    if extract_annotations:
+        annots_md = get_annotations_ratio(
+            fake_events, raw, supercrop_size_samples)
+        metadata = pd.concat([metadata, annots_md], axis=1)
 
     # supercrop size - 1, since tmax is inclusive
     mne_epochs = mne.Epochs(
@@ -213,7 +218,7 @@ def create_fixed_length_windows(
         concat_ds, start_offset_samples, stop_offset_samples,
         supercrop_size_samples, supercrop_stride_samples, drop_samples,
         mapping=None, picks=None, preload=False, drop_bad_windows=True,
-        transform=None, n_jobs=1, max_nbytes='1M'):
+        transform=None, extract_annotations=False, n_jobs=1, max_nbytes='1M'):
     """Windower that creates sliding supercrops/windows.
 
     Parameters
@@ -244,6 +249,9 @@ def create_fixed_length_windows(
         the BaseConcatDataset has to be updated as well.
     transform: object | None
         Transform to be applied on-the-fly when calling __getitem__.
+    extract_annotations: bool
+        If True, extract overlapping ratios of the annotations in the Raw object
+        and add them to the metadata DataFrame.
     n_jobs: int
         Number of jobs to parallelize the windowing.
 
@@ -261,14 +269,16 @@ def create_fixed_length_windows(
             get_fixed_length_window(
                 ds, mapping, start_offset_samples, stop_offset_samples,
                 supercrop_size_samples, supercrop_stride_samples, drop_samples,
-                drop_bad_windows, preload, picks, transform)
+                drop_bad_windows, preload, picks, transform,
+                extract_annotations=extract_annotations)
             for ds in concat_ds.datasets]
     else:
         list_of_windows_ds = Parallel(n_jobs=n_jobs, max_nbytes=max_nbytes)(
             delayed(get_fixed_length_window)(
                 ds, mapping, start_offset_samples, stop_offset_samples,
                 supercrop_size_samples, supercrop_stride_samples, drop_samples,
-                drop_bad_windows, preload, picks, transform)
+                drop_bad_windows, preload, picks, transform,
+                extract_annotations=extract_annotations)
             for ds in concat_ds.datasets)
 
     list_of_windows_ds = [ds for ds in list_of_windows_ds if ds is not None]
@@ -366,29 +376,32 @@ def get_annotations_ratio(events, raw, win_len):
         Events, shape (n_events, 3)
     annots : mne.Annotations
         Annotations.
-    times : np.ndarray
-        Sample times.
     win_len : int
         Number of samples in a window.
 
     Return
     ------
     pd.DataFrame
-        DataFrame of shape (n_events, n_unique_annotations) containing the ratio
-        of each annotation for each event.
+        DataFrame of shape (n_events, n_unique_annotations) containing the
+        ratio of each annotation for each event.
     """
-    unique_annots = {d: i for i, d in enumerate(np.unique(raw.annotations.description))}
-    annots_events = np.zeros((events.shape[0], len(unique_annots)), dtype=np.float16)
+    unique_annots = {
+        d: i for i, d in enumerate(np.unique(raw.annotations.description))}
+    annots_events = np.zeros(
+        (len(events), len(unique_annots)), dtype=np.float16)
 
     for a_type in unique_annots:
         grouped_a = raw.annotations[raw.annotations.description == a_type]
         trigger = np.zeros(len(raw.times), dtype=int)
         for a in grouped_a:
-            onset = a['onset'] - raw.first_samp / raw.info['sfreq']
+            # onset = a['onset'] - raw.first_samp / raw.info['sfreq']
+            if raw.first_samp != 0:
+                raise NotImplementedError('THIS NEEDS TO BE TESTED.')
             mask = ((raw.times >= a['onset']) &
                     (raw.times < a['onset'] + a['duration']))  # This is probably a big bottleneck...
             trigger[mask] = 1
-        for i, start in enumerate(events[:, 0]):
-            annots_events[i, unique_annots[a_type]] = trigger[start:start + win_len].mean()
+        for i, ev in enumerate(events):
+            annots_events[i, unique_annots[a_type]] = trigger[
+                ev[0]:ev[0] + win_len].mean()
 
     return pd.DataFrame(annots_events, columns=unique_annots.keys())

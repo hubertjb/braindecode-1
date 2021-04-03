@@ -120,6 +120,7 @@ class WindowsDataset(BaseDataset):
         # XXX: Temporary hack - find another way to avoid skorch's
         #      incompatibility with more than 2 outputs
         self.output_crop_inds = False
+        self.output_subj = False  # XXX another temporary hack to be able to average prediction per recording
         if self.output_crop_inds:
             self.crop_inds = np.array(
                 self.windows.metadata.loc[
@@ -135,8 +136,9 @@ class WindowsDataset(BaseDataset):
         X = self.windows.get_data(picks=self.picks, item=index)[0]
         if self.transform is not None:
             X = self.transform(X)
+
         if isinstance(X, (tuple, list)):  # Temporary solution for DSF tests
-            X = [x.astype('float32') for x in X]
+            X = tuple(x.astype('float32') for x in X)
         else:
             X = X.astype('float32')
         y = self.y[index]
@@ -146,6 +148,15 @@ class WindowsDataset(BaseDataset):
             # three tensors from batch, otherwise get single 2d-tensor...
             crop_inds = list(self.crop_inds[index])
             return X, y, crop_inds
+        elif self.output_subj:
+            if 'subject' in self.description:
+                key = 'subject'
+            elif 'session_id' in self.description:  # XXX Another temporary hack to account for differences in column names in MSD
+                key = 'session_id'
+            else:
+                raise ValueError('Subject key not found in description.')
+
+            return X, y, self.description[key]
         else:
             return X, y
 
