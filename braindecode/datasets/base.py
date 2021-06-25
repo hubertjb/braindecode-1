@@ -18,7 +18,6 @@ from glob import glob
 
 import numpy as np
 import pandas as pd
-
 from torch.utils.data import Dataset, ConcatDataset
 
 
@@ -374,8 +373,8 @@ class BaseConcatDataset(ConcatDataset):
         path : str
             Directory to which .fif / -epo.fif and .json files are stored.
         overwrite : bool
-            Whether to delete old files (.json, .fif, -epo.fif) in specified directory
-            prior to saving.
+            Whether to delete old files (.json, .fif, -epo.fif) in specified
+            directory prior to saving.
         """
         assert len(self.datasets) > 0, "Expect at least one dataset"
         assert (hasattr(self.datasets[0], 'raw') + hasattr(
